@@ -1,3 +1,5 @@
+![screenshot](screenshot.png)
+
 GUI for the BASLER acA640 750um (grey levels).
 
 ## Installation
