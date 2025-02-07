@@ -390,6 +390,7 @@ if __name__ == "__main__":
     application = PySide6.QtGui.QGuiApplication(sys.argv)
     PySide6.QtGui.QFontDatabase.addApplicationFont(str(dirname / "RobotoMono.ttf"))
     monospace_font = PySide6.QtGui.QFontDatabase.font("Roboto Mono", "Regular", 12)
+    monospace_font.setPixelSize(12)
     engine = PySide6.QtQml.QQmlApplicationEngine()
     engine.quit.connect(application.quit)
     image_provider = ImageProvider(configuration=configuration)
