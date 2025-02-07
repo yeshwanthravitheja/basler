@@ -2,6 +2,8 @@
 
 GUI for the BASLER acA640 750um (grey levels).
 
+Tested on macOS 15.1.1 (Apple silicon) and Windows 11 (x86).
+
 ## Installation
 
 ```sh

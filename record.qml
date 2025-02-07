@@ -296,13 +296,31 @@ ApplicationWindow {
                         spacing: 20
                         Text {
                             Layout.alignment: Qt.AlignVCenter | Qt.AlignLeft
-                            text: "Buffer usage"
+                            text: "USB buffer usage"
                             color: "#CCCCCC"
                             font: monospace_font
                         }
                         Text {
                             Layout.alignment: Qt.AlignVCenter | Qt.AlignLeft
                             text: configuration ? `${configuration.queued_buffers} / ${configuration.maximum_queued_buffers}` : "-"
+                            color: "#FFFFFF"
+                            font: monospace_font
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.topMargin: 5
+                        Layout.alignment: Qt.AlignVCenter | Qt.AlignLeft
+                        spacing: 20
+                        Text {
+                            Layout.alignment: Qt.AlignVCenter | Qt.AlignLeft
+                            text: "RAM buffer"
+                            color: "#CCCCCC"
+                            font: monospace_font
+                        }
+                        Text {
+                            Layout.alignment: Qt.AlignVCenter | Qt.AlignLeft
+                            text: configuration ? configuration.buffered_frames : "-"
                             color: "#FFFFFF"
                             font: monospace_font
                         }

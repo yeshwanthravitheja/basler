@@ -51,6 +51,14 @@ class Recorder:
             new_output = self.output
             if new_output != current_output:
                 if output_file is not None:
+                    buffered_frames = len(self.queue)
+                    for _ in range(0, buffered_frames):
+                        try:
+                            timestamp, width, height, data = self.queue.popleft()
+                            output_file.write(struct.pack("<Q", timestamp))  # type: ignore
+                            output_file.write(data)  # type: ignore
+                        except IndexError:
+                            break
                     output_file.close()
                     output_file = None
                     current_bytes = 0
@@ -76,7 +84,21 @@ class Recorder:
                 self.configuration.insert("recording_duration", "00:00:00.000")
             try:
                 timestamp, width, height, data = self.queue.popleft()
-                if current_output is not None:
+                buffered_frames = len(self.queue)
+
+                if buffered_frames < 10:
+                    buffered_frames_string = "< 10 frames"
+                else:
+                    buffered_frames_string = f"{buffered_frames} frames"
+
+                if current_output is None:
+                    now = time.monotonic_ns()
+                    if now - last_update > 10000000:  # 10 ms
+                        last_update = now
+                        self.configuration.insert(
+                            "buffered_frames", buffered_frames_string
+                        )
+                else:
                     if current_first_timestamp is None:
                         current_first_timestamp = timestamp
                     assert (
@@ -92,6 +114,9 @@ class Recorder:
                     now = time.monotonic_ns()
                     if now - last_update > 10000000:  # 10 ms
                         last_update = now
+                        self.configuration.insert(
+                            "buffered_frames", buffered_frames_string
+                        )
                         if current_bytes < 1000000:
                             current_bytes_string = f"{current_bytes / 1e3:.2f} kB"
                         elif current_bytes < 1000000000:
@@ -119,8 +144,20 @@ class Recorder:
                         )
 
             except IndexError:
+                now = time.monotonic_ns()
+                if now - last_update > 10000000:  # 10 ms
+                    last_update = now
+                    self.configuration.insert("buffered_frames", "< 10 frames")
                 time.sleep(0.005)
         if output_file is not None:
+            buffered_frames = len(self.queue)
+            for _ in range(0, buffered_frames):
+                try:
+                    timestamp, width, height, data = self.queue.popleft()
+                    output_file.write(struct.pack("<Q", timestamp))  # type: ignore
+                    output_file.write(data)  # type: ignore
+                except IndexError:
+                    break
             output_file.close()
 
     def __enter__(self) -> "Recorder":
@@ -348,6 +385,7 @@ if __name__ == "__main__":
     configuration.insert("recording_duration", "00:00:00.000")
     configuration.insert("queued_buffers", 0)
     configuration.insert("maximum_queued_buffers", 0)
+    configuration.insert("buffered_frames", "0 frames")
 
     application = PySide6.QtGui.QGuiApplication(sys.argv)
     PySide6.QtGui.QFontDatabase.addApplicationFont(str(dirname / "RobotoMono.ttf"))
@@ -361,107 +399,111 @@ if __name__ == "__main__":
     engine.load("record.qml")
     recordings = dirname / "recordings"
     recordings.mkdir(exist_ok=True)
-    recorder = Recorder(configuration=configuration)
-
-    camera = pylon.InstantCamera(pylon.TlFactory.GetInstance().CreateFirstDevice())
-    camera.RegisterImageEventHandler(
-        ImageEventHandler(
-            recorder=recorder,
-            image_provider=image_provider,
-            configuration=configuration,
-        ),
-        pylon.RegistrationMode_Append,
-        pylon.Cleanup_Delete,
-    )
-    camera.MaxNumQueuedBuffer.Value = 1024
-    camera.Open()
-    if camera.Width.Value > 640:
-        camera.Width.Value = 640
-        camera.OffsetX.Value = 16
-    else:
-        camera.OffsetX.Value = 16
-        camera.Width.Value = 640
-    if camera.Height.Value > 480:
-        camera.Height.Value = 480
-        camera.OffsetY.Value = 8
-    else:
-        camera.OffsetY.Value = 8
-        camera.Height.Value = 480
-    camera.ExposureAuto.Value = "Off"
-    camera.GainAuto.Value = "Off"
-    camera.PixelFormat.Value = "Mono10p"
-    camera.ExposureTime.Value = 1000.0  # µs
-    camera.Gain.Value = 0.0
-    camera.AcquisitionFrameRateEnable.Value = True
-    camera.AcquisitionFrameRate.Value = 500
-    configuration.insert("calculated_framerate", camera.ResultingFrameRate.Value)
-    configuration.insert("maximum_queued_buffers", int(camera.MaxNumQueuedBuffer.Value))
-
-    def on_configuration_update(key: str, value: typing.Any):
-        if key == "width":
-            camera.StopGrabbing()
-            if camera.Width.Value > int(value):
-                camera.Width.Value = int(value)
-                camera.OffsetX.Value = int(round((656 - int(value)) / 32) * 16)
-            else:
-                camera.OffsetX.Value = int(round((656 - int(value)) / 32) * 16)
-                camera.Width.Value = int(value)
-            camera.StartGrabbing(
-                pylon.GrabStrategy_OneByOne,
-                pylon.GrabLoop_ProvidedByInstantCamera,
-            )
-        elif key == "height":
-            camera.StopGrabbing()
-            if camera.Height.Value > int(value):
-                camera.Height.Value = int(value)
-                camera.OffsetY.Value = (496 - int(value)) // 2
-            else:
-                camera.OffsetY.Value = (496 - int(value)) // 2
-                camera.Height.Value = int(value)
-            camera.StartGrabbing(
-                pylon.GrabStrategy_OneByOne,
-                pylon.GrabLoop_ProvidedByInstantCamera,
-            )
-        elif key == "framerate":
-            camera.AcquisitionFrameRate.Value = float(value) / 10.0
-        elif key == "exposure":
-            camera.ExposureTime.Value = float(value)
-        elif key == "gain":
-            camera.Gain.Value = float(value) / 100.0
-        elif key == "calculated_framerate":
-            pass
-        elif key == "measured_framerate":
-            pass
-        elif key == "start_recording":
-            exposure = camera.ExposureTime.Value
-            gain = camera.Gain.Value
-            recording_name = (
-                datetime.datetime.now(tz=datetime.timezone.utc)
-                .isoformat()
-                .replace("+00:00", "Z")
-                .replace(":", "-")
-                + ".basler"
-            )
-            recorder.start(
-                path=recordings / recording_name,
-                width=camera.Width.Value,
-                height=camera.Height.Value,
-                exposure=exposure,
-                gain=gain,
-            )
-            configuration.insert("recording_name", recording_name)
-        elif key == "stop_recording":
-            recorder.stop()
-            configuration.insert("recording_name", None)
+    code = 0
+    with Recorder(configuration=configuration) as recorder:
+        camera = pylon.InstantCamera(pylon.TlFactory.GetInstance().CreateFirstDevice())
+        camera.RegisterImageEventHandler(
+            ImageEventHandler(
+                recorder=recorder,
+                image_provider=image_provider,
+                configuration=configuration,
+            ),
+            pylon.RegistrationMode_Append,
+            pylon.Cleanup_Delete,
+        )
+        camera.MaxNumQueuedBuffer.Value = 1024
+        camera.Open()
+        if camera.Width.Value > 640:
+            camera.Width.Value = 640
+            camera.OffsetX.Value = 16
         else:
-            print(f"unknown {key=} with value {value}")
+            camera.OffsetX.Value = 16
+            camera.Width.Value = 640
+        if camera.Height.Value > 480:
+            camera.Height.Value = 480
+            camera.OffsetY.Value = 8
+        else:
+            camera.OffsetY.Value = 8
+            camera.Height.Value = 480
+        camera.ExposureAuto.Value = "Off"
+        camera.GainAuto.Value = "Off"
+        camera.PixelFormat.Value = "Mono10p"
+        camera.ExposureTime.Value = 1000.0  # µs
+        camera.Gain.Value = 0.0
+        camera.AcquisitionFrameRateEnable.Value = True
+        camera.AcquisitionFrameRate.Value = 500
         configuration.insert("calculated_framerate", camera.ResultingFrameRate.Value)
+        configuration.insert(
+            "maximum_queued_buffers", int(camera.MaxNumQueuedBuffer.Value)
+        )
 
-    configuration.valueChanged.connect(on_configuration_update)
-    camera.StartGrabbing(
-        pylon.GrabStrategy_OneByOne,
-        pylon.GrabLoop_ProvidedByInstantCamera,
-    )
-    code = application.exec()
-    camera.Close()
+        def on_configuration_update(key: str, value: typing.Any):
+            if key == "width":
+                camera.StopGrabbing()
+                if camera.Width.Value > int(value):
+                    camera.Width.Value = int(value)
+                    camera.OffsetX.Value = int(round((656 - int(value)) / 32) * 16)
+                else:
+                    camera.OffsetX.Value = int(round((656 - int(value)) / 32) * 16)
+                    camera.Width.Value = int(value)
+                camera.StartGrabbing(
+                    pylon.GrabStrategy_OneByOne,
+                    pylon.GrabLoop_ProvidedByInstantCamera,
+                )
+            elif key == "height":
+                camera.StopGrabbing()
+                if camera.Height.Value > int(value):
+                    camera.Height.Value = int(value)
+                    camera.OffsetY.Value = (496 - int(value)) // 2
+                else:
+                    camera.OffsetY.Value = (496 - int(value)) // 2
+                    camera.Height.Value = int(value)
+                camera.StartGrabbing(
+                    pylon.GrabStrategy_OneByOne,
+                    pylon.GrabLoop_ProvidedByInstantCamera,
+                )
+            elif key == "framerate":
+                camera.AcquisitionFrameRate.Value = float(value) / 10.0
+            elif key == "exposure":
+                camera.ExposureTime.Value = float(value)
+            elif key == "gain":
+                camera.Gain.Value = float(value) / 100.0
+            elif key == "calculated_framerate":
+                pass
+            elif key == "measured_framerate":
+                pass
+            elif key == "start_recording":
+                exposure = camera.ExposureTime.Value
+                gain = camera.Gain.Value
+                recording_name = (
+                    datetime.datetime.now(tz=datetime.timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", "Z")
+                    .replace(":", "-")
+                    + ".basler"
+                )
+                recorder.start(
+                    path=recordings / recording_name,
+                    width=camera.Width.Value,
+                    height=camera.Height.Value,
+                    exposure=exposure,
+                    gain=gain,
+                )
+                configuration.insert("recording_name", recording_name)
+            elif key == "stop_recording":
+                recorder.stop()
+                configuration.insert("recording_name", None)
+            else:
+                print(f"unknown {key=} with value {value}")
+            configuration.insert(
+                "calculated_framerate", camera.ResultingFrameRate.Value
+            )
+
+        configuration.valueChanged.connect(on_configuration_update)
+        camera.StartGrabbing(
+            pylon.GrabStrategy_OneByOne,
+            pylon.GrabLoop_ProvidedByInstantCamera,
+        )
+        code = application.exec()
+        camera.Close()
     sys.exit(code)
