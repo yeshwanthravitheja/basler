@@ -29,127 +29,307 @@ class Output:
     gain: float
 
 
+def size_to_string(size: int) -> str:
+    if size < 1000000:
+        return f"{size / 1e3:.2f} kB"
+    if size < 1000000000:
+        return f"{size / 1e6:.2f} MB"
+    if size < 1000000000000:
+        return f"{size / 1e9:.2f} GB"
+    return f"{size / 1e12:.2f} TB"
+
+
+def milliseconds_to_string(milliseconds: int) -> str:
+    hours = milliseconds // 3600000
+    milliseconds -= hours * 3600000
+    minutes = milliseconds // 60000
+    milliseconds -= minutes * 60000
+    seconds = milliseconds // 1000
+    milliseconds -= seconds * 1000
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{milliseconds:03d}"
+
+
+class CircularBuffer:
+    def __init__(self, length: int):
+        self.data: list[typing.Optional[tuple[int, int, int, bytearray]]] = [
+            None
+        ] * length
+        self.write_index = 0
+        self.packets = 0
+
+    def resize(self, new_length: int):
+        length = len(self.data)
+        if length == new_length:
+            return
+        new_data: list[typing.Optional[tuple[int, int, int, bytearray]]] = [
+            None
+        ] * new_length
+        if new_length > length:
+            index = self.write_index
+            for new_index in range(0, length):
+                new_data[new_index] = self.data[index]
+                index = (index + 1) % length
+                if index == self.write_index:
+                    break
+            self.data = new_data
+            self.write_index = length
+            self.packets = length
+        else:
+            index = (self.write_index + (length - new_length)) % length
+            for new_index in range(0, new_length):
+                new_data[new_index] = self.data[index]
+                index = (index + 1) % length
+            assert index == self.write_index
+            self.data = new_data
+            self.write_index = 0
+            self.packets = min(self.packets, new_length)
+
+    def clear(self):
+        self.data = [None] * len(self.data)
+
+    def push(self, timestamp: int, width: int, height: int, data: bytearray):
+        self.data[self.write_index] = (timestamp, width, height, data)
+        self.write_index = (self.write_index + 1) % len(self.data)
+        self.packets = min(self.packets + 1, len(self.data))
+
+
 class Recorder:
     def __init__(self, configuration: PySide6.QtQml.QQmlPropertyMap):
+        self.mode = 0
         self.configuration = configuration
         self.queue: collections.deque[tuple[int, int, int, bytearray]] = (
             collections.deque()
         )
+        self.circular_buffers: tuple[CircularBuffer, CircularBuffer] = (
+            CircularBuffer(1),
+            CircularBuffer(1),
+        )
+        self.circular_buffers_lock = threading.Lock()
+        self.active_circular_buffer = 0
         self.output: typing.Optional[Output] = None
         self.running = True
         self.thread = threading.Thread(target=self.target, daemon=True)
         self.thread.start()
 
+    def direct_mode(self):
+        self.mode = 0
+        with self.circular_buffers_lock:
+            self.circular_buffers[0].resize(1)
+            self.circular_buffers[0].resize(1)
+
+    def circular_buffer(self, length: int):
+        with self.circular_buffers_lock:
+            self.circular_buffers[0].resize(length)
+            self.circular_buffers[1].resize(length)
+        self.mode = 1
+        self.queue.clear()
+
     def target(self):
-        current_output = None
-        output_file: typing.Optional[typing.IO[bytes]] = None
-        current_bytes = 0
-        current_frames = 0
-        current_first_timestamp = None
+        current_mode = 0
+        queue_output = None
+        queue_output_file: typing.Optional[typing.IO[bytes]] = None
+        queue_recorded_bytes = 0
+        queue_recorded_frames = 0
+        queue_recorded_first_timestamp = None
         last_update = 0
         while self.running:
+            if queue_output is None:
+                current_mode = self.mode
             new_output = self.output
-            if new_output != current_output:
-                if output_file is not None:
-                    buffered_frames = len(self.queue)
-                    for _ in range(0, buffered_frames):
-                        try:
-                            timestamp, width, height, data = self.queue.popleft()
-                            output_file.write(struct.pack("<Q", timestamp))  # type: ignore
-                            output_file.write(data)  # type: ignore
-                        except IndexError:
-                            break
-                    output_file.close()
-                    output_file = None
-                    current_bytes = 0
-                    current_frames = 0
-                    current_first_timestamp = None
-                current_output = new_output
-                if current_output is not None:
-                    output_file = open(current_output.path, "wb")
-                    output_file.write(b"BASLER")
-                    output_file.write(
-                        struct.pack(
-                            "<HHdd",
-                            current_output.width,
-                            current_output.height,
-                            current_output.exposure,
-                            current_output.gain,
+            if current_mode == 0:  # direct mode
+                if new_output != queue_output:
+                    if queue_output_file is not None:
+                        buffered_frames = len(self.queue)
+                        for _ in range(0, buffered_frames):
+                            try:
+                                timestamp, width, height, data = self.queue.popleft()
+                                queue_output_file.write(struct.pack("<Q", timestamp))  # type: ignore
+                                queue_output_file.write(data)  # type: ignore
+                            except IndexError:
+                                break
+                        queue_output_file.close()
+                        queue_output_file = None
+                        queue_recorded_bytes = 0
+                        queue_recorded_frames = 0
+                        queue_recorded_first_timestamp = None
+                    queue_output = new_output
+                    if queue_output is not None:
+                        queue_output_file = open(queue_output.path, "wb")
+                        queue_output_file.write(b"BASLER")
+                        queue_output_file.write(
+                            struct.pack(
+                                "<HHdd",
+                                queue_output.width,
+                                queue_output.height,
+                                queue_output.exposure,
+                                queue_output.gain,
+                            )
                         )
+                        queue_recorded_bytes = 26
+                    last_update = time.monotonic_ns()
+                    self.configuration.insert(
+                        "recording_bytes", f"{queue_recorded_bytes} B"
                     )
-                    current_bytes = 26
-                last_update = time.monotonic_ns()
-                self.configuration.insert("recording_bytes", "26 B")
-                self.configuration.insert("recording_frames", current_frames)
-                self.configuration.insert("recording_duration", "00:00:00.000")
-            try:
-                timestamp, width, height, data = self.queue.popleft()
-                buffered_frames = len(self.queue)
+                    self.configuration.insert("recording_frames", queue_recorded_frames)
+                    self.configuration.insert("recording_duration", "00:00:00.000")
+                try:
+                    timestamp, width, height, data = self.queue.popleft()
+                    buffered_frames = len(self.queue)
 
-                if buffered_frames < 10:
-                    buffered_frames_string = "< 10 frames"
-                else:
-                    buffered_frames_string = f"{buffered_frames} frames"
+                    if buffered_frames < 10:
+                        buffered_frames_string = "< 10 frames"
+                    else:
+                        buffered_frames_string = f"{buffered_frames} frames"
+                    if queue_output is None:
+                        now = time.monotonic_ns()
+                        if now - last_update > 10000000:  # 10 ms
+                            last_update = now
+                            self.configuration.insert(
+                                "buffered_frames", buffered_frames_string
+                            )
+                    else:
+                        if queue_recorded_first_timestamp is None:
+                            queue_recorded_first_timestamp = timestamp
+                        assert (
+                            width == queue_output.width
+                        ), f"{width=} {queue_output.width=}"
+                        assert (
+                            height == queue_output.height
+                        ), f"{height=} {queue_output.height=}"
+                        queue_output_file.write(struct.pack("<Q", timestamp))  # type: ignore
+                        queue_output_file.write(data)  # type: ignore
+                        queue_recorded_bytes += 8 + len(data)
+                        queue_recorded_frames += 1
+                        now = time.monotonic_ns()
+                        if now - last_update > 10000000:  # 10 ms
+                            last_update = now
+                            self.configuration.insert(
+                                "buffered_frames", buffered_frames_string
+                            )
+                            self.configuration.insert(
+                                "recording_bytes", size_to_string(queue_recorded_bytes)
+                            )
+                            self.configuration.insert(
+                                "recording_frames", queue_recorded_frames
+                            )
+                            self.configuration.insert(
+                                "recording_duration",
+                                milliseconds_to_string(
+                                    int(
+                                        round(
+                                            timestamp / 1e6
+                                            - queue_recorded_first_timestamp / 1e6
+                                        )
+                                    )
+                                ),
+                            )
 
-                if current_output is None:
+                except IndexError:
                     now = time.monotonic_ns()
                     if now - last_update > 10000000:  # 10 ms
                         last_update = now
-                        self.configuration.insert(
-                            "buffered_frames", buffered_frames_string
-                        )
-                else:
-                    if current_first_timestamp is None:
-                        current_first_timestamp = timestamp
-                    assert (
-                        width == current_output.width
-                    ), f"{width=} {current_output.width=}"
-                    assert (
-                        height == current_output.height
-                    ), f"{height=} {current_output.height=}"
-                    output_file.write(struct.pack("<Q", timestamp))  # type: ignore
-                    output_file.write(data)  # type: ignore
-                    current_bytes += 8 + len(data)
-                    current_frames += 1
+                        self.configuration.insert("buffered_frames", "< 10 frames")
+                    time.sleep(0.005)
+            else:  # circular buffer
+                if new_output is None:
                     now = time.monotonic_ns()
                     if now - last_update > 10000000:  # 10 ms
                         last_update = now
+                        with self.circular_buffers_lock:
+                            circular_buffer_length = len(
+                                self.circular_buffers[self.active_circular_buffer].data
+                            )
+                            circular_buffer_packets = self.circular_buffers[
+                                self.active_circular_buffer
+                            ].packets
                         self.configuration.insert(
-                            "buffered_frames", buffered_frames_string
+                            "circular_buffer_usage",
+                            f"{circular_buffer_packets} / {circular_buffer_length}",
                         )
-                        if current_bytes < 1000000:
-                            current_bytes_string = f"{current_bytes / 1e3:.2f} kB"
-                        elif current_bytes < 1000000000:
-                            current_bytes_string = f"{current_bytes / 1e6:.2f} MB"
-                        elif current_bytes < 1000000000000:
-                            current_bytes_string = f"{current_bytes / 1e9:.2f} GB"
-                        else:
-                            current_bytes_string = f"{current_bytes / 1e12:.2f} TB"
-                        self.configuration.insert(
-                            "recording_bytes", current_bytes_string
+                    time.sleep(0.005)
+                else:
+                    with self.circular_buffers_lock:
+                        circular_buffer_length = len(
+                            self.circular_buffers[self.active_circular_buffer].data
                         )
-                        self.configuration.insert("recording_frames", current_frames)
-                        milliseconds = int(
-                            round(timestamp / 1e6 - current_first_timestamp / 1e6)
+                        save_circular_buffer = self.active_circular_buffer
+                        self.active_circular_buffer = (
+                            self.active_circular_buffer + 1
+                        ) % 2
+                    with open(new_output.path, "wb") as circular_buffer_output_file:
+                        circular_buffer_output_file.write(b"BASLER")
+                        circular_buffer_output_file.write(
+                            struct.pack(
+                                "<HHdd",
+                                new_output.width,
+                                new_output.height,
+                                new_output.exposure,
+                                new_output.gain,
+                            )
                         )
-                        hours = milliseconds // 3600000
-                        milliseconds -= hours * 3600000
-                        minutes = milliseconds // 60000
-                        milliseconds -= minutes * 60000
-                        seconds = milliseconds // 1000
-                        milliseconds -= seconds * 1000
-                        self.configuration.insert(
-                            "recording_duration",
-                            f"{hours:02d}:{minutes:02d}:{seconds:02d}.{milliseconds:03d}",
-                        )
+                        circular_buffer_bytes = 26
+                        circular_buffer_frames = 0
+                        circular_buffer_first_timestamp: typing.Optional[int] = None
+                        write_index = self.circular_buffers[
+                            save_circular_buffer
+                        ].write_index
+                        index = write_index
+                        while True:
+                            packet = self.circular_buffers[save_circular_buffer].data[
+                                index
+                            ]
+                            if packet is not None:
+                                timestamp, width, height, data = packet
+                                if circular_buffer_first_timestamp is None:
+                                    circular_buffer_first_timestamp = timestamp
+                                circular_buffer_output_file.write(
+                                    struct.pack("<Q", timestamp)
+                                )
+                                circular_buffer_output_file.write(data)
+                                circular_buffer_bytes += 8 + len(data)
+                                circular_buffer_frames += 1
+                                now = time.monotonic_ns()
+                                if now - last_update > 10000000:  # 10 ms
+                                    last_update = now
+                                    self.configuration.insert(
+                                        "recording_bytes",
+                                        size_to_string(circular_buffer_bytes),
+                                    )
+                                    self.configuration.insert(
+                                        "recording_frames",
+                                        circular_buffer_first_timestamp,
+                                    )
+                                    self.configuration.insert(
+                                        "recording_duration",
+                                        milliseconds_to_string(
+                                            int(
+                                                round(
+                                                    timestamp / 1e6
+                                                    - circular_buffer_first_timestamp
+                                                    / 1e6
+                                                )
+                                            )
+                                        ),
+                                    )
+                            self.circular_buffers[save_circular_buffer].data[
+                                index
+                            ] = None
+                            index = (index + 1) % len(
+                                self.circular_buffers[save_circular_buffer].data
+                            )
+                            if index == write_index:
+                                break
+                    self.configuration.insert("recording_bytes", "0 B")
+                    self.configuration.insert("recording_frames", 0)
+                    self.configuration.insert("recording_duration", "00:00:00.000")
+                    self.configuration.insert("recording_name", None)
+                    self.configuration.insert(
+                        "circular_buffer_usage",
+                        f"0 / {circular_buffer_length}",
+                    )
+                    self.output = None
 
-            except IndexError:
-                now = time.monotonic_ns()
-                if now - last_update > 10000000:  # 10 ms
-                    last_update = now
-                    self.configuration.insert("buffered_frames", "< 10 frames")
-                time.sleep(0.005)
-        if output_file is not None:
+        if queue_output_file is not None:
             buffered_frames = len(self.queue)
             for _ in range(0, buffered_frames):
                 try:
@@ -158,7 +338,7 @@ class Recorder:
                     output_file.write(data)  # type: ignore
                 except IndexError:
                     break
-            output_file.close()
+            queue_output_file.close()
 
     def __enter__(self) -> "Recorder":
         return self
@@ -193,7 +373,13 @@ class Recorder:
         self.output = None
 
     def push(self, timestamp: int, width: int, height: int, data: bytearray):
-        self.queue.append((timestamp, width, height, data))
+        if self.mode == 0:  # direct
+            self.queue.append((timestamp, width, height, data))
+        else:  # circular buffer
+            with self.circular_buffers_lock:
+                self.circular_buffers[self.active_circular_buffer].push(
+                    timestamp, width, height, data
+                )
 
 
 class ImageProvider(PySide6.QtQuick.QQuickImageProvider):
@@ -377,6 +563,28 @@ class ImageEventHandler(pylon.ImageEventHandler):
             self.image_provider.update_array(timestamp, width, height, data)
 
 
+SUFFIX_AND_MULTIPLIER: list[tuple["str", float]] = [
+    (" ms", 0.001),
+    ("ms", 0.001),
+    (" s", 1.0),
+    ("s", 1.0),
+]
+
+FRAMERATE_KEYS: set[str] = {
+    "width",
+    "height",
+    "framerate",
+    "exposure",
+}
+
+
+def parse_duration(duration: str) -> float:
+    for suffix, multiplier in SUFFIX_AND_MULTIPLIER:
+        if duration.endswith(suffix):
+            return float(duration[: -len(suffix)])
+    raise Exception(f"parsing {duration=} failed (found no matching suffix)")
+
+
 if __name__ == "__main__":
     configuration = PySide6.QtQml.QQmlPropertyMap()
     configuration.insert("recording_name", None)
@@ -386,6 +594,8 @@ if __name__ == "__main__":
     configuration.insert("queued_buffers", 0)
     configuration.insert("maximum_queued_buffers", 0)
     configuration.insert("buffered_frames", "0 frames")
+    configuration.insert("mode", 0)
+    configuration.insert("circular_buffer_duration", "1 s")
 
     application = PySide6.QtGui.QGuiApplication(sys.argv)
     PySide6.QtGui.QFontDatabase.addApplicationFont(str(dirname / "RobotoMono.ttf"))
@@ -400,7 +610,11 @@ if __name__ == "__main__":
     engine.load("record.qml")
     recordings = dirname / "recordings"
     recordings.mkdir(exist_ok=True)
-    code = 0
+    application_globals = {
+        "code": 0,
+        "mode": 0,
+        "circular_buffer_duration_s": 5.0,
+    }
     with Recorder(configuration=configuration) as recorder:
         camera = pylon.InstantCamera(pylon.TlFactory.GetInstance().CreateFirstDevice())
         camera.RegisterImageEventHandler(
@@ -494,17 +708,50 @@ if __name__ == "__main__":
             elif key == "stop_recording":
                 recorder.stop()
                 configuration.insert("recording_name", None)
+            elif key == "mode":
+                application_globals["mode"] = value
+                if value == 0:
+                    recorder.direct_mode()
+                elif value == 1:
+                    recorder.circular_buffer(
+                        length=round(
+                            application_globals["circular_buffer_duration_s"]
+                            * camera.ResultingFrameRate.Value
+                        )
+                    )
+                else:
+                    raise Exception(f'unexpected {value=} for key "mode"')
+            elif key == "circular_buffer_duration":
+                application_globals["circular_buffer_duration_s"] = parse_duration(
+                    value
+                )
+                if application_globals["mode"] == 1:
+                    recorder.circular_buffer(
+                        length=round(
+                            application_globals["circular_buffer_duration_s"]
+                            * camera.ResultingFrameRate.Value
+                        )
+                    )
             else:
                 print(f"unknown {key=} with value {value}")
             configuration.insert(
                 "calculated_framerate", camera.ResultingFrameRate.Value
             )
 
+            if key in FRAMERATE_KEYS:
+                if application_globals["mode"] == 1:
+                    recorder.circular_buffer(
+                        length=round(
+                            application_globals["circular_buffer_duration_s"]
+                            * camera.ResultingFrameRate.Value
+                        )
+                    )
+
         configuration.valueChanged.connect(on_configuration_update)
         camera.StartGrabbing(
             pylon.GrabStrategy_OneByOne,
             pylon.GrabLoop_ProvidedByInstantCamera,
         )
-        code = application.exec()
+        application_globals["code"] = application.exec()
         camera.Close()
-    sys.exit(code)
+    sys.exit(application_globals["code"])

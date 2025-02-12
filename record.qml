@@ -312,6 +312,21 @@ ApplicationWindow {
                         Layout.topMargin: 5
                         Layout.alignment: Qt.AlignVCenter | Qt.AlignLeft
                         spacing: 20
+
+                        ComboBox {
+                            model: ["Direct mode", "Circular buffer"]
+                            enabled: configuration?.recording_name == null
+                            onCurrentIndexChanged: {
+                                configuration.mode = currentIndex;
+                            }
+                        }
+                    }
+
+                    RowLayout {
+                        visible: configuration?.mode == 0
+                        Layout.topMargin: 5
+                        Layout.alignment: Qt.AlignVCenter | Qt.AlignLeft
+                        spacing: 20
                         Text {
                             Layout.alignment: Qt.AlignVCenter | Qt.AlignLeft
                             text: "RAM buffer"
@@ -321,6 +336,52 @@ ApplicationWindow {
                         Text {
                             Layout.alignment: Qt.AlignVCenter | Qt.AlignLeft
                             text: configuration ? configuration.buffered_frames : "-"
+                            color: "#FFFFFF"
+                            font: monospace_font
+                        }
+                    }
+
+                    ColumnLayout {
+                        visible: configuration?.mode == 1
+                        Layout.topMargin: 5
+                        Layout.alignment: Qt.AlignVCenter | Qt.AlignLeft
+                        spacing: 5
+
+                        RowLayout {
+                            Layout.topMargin: 5
+                            Layout.alignment: Qt.AlignVCenter | Qt.AlignLeft
+                            spacing: 20
+                            Text {
+                                Layout.alignment: Qt.AlignVCenter | Qt.AlignLeft
+                                text: "Duration"
+                                color: "#CCCCCC"
+                                font: monospace_font
+                            }
+                            ComboBox {
+                                model: ["100 ms", "200 ms", "500 ms", "1 s", "2 s", "5 s", "10 s", "20 s"]
+                                currentIndex: 5
+                                enabled: configuration?.recording_name == null
+                                onCurrentIndexChanged: {
+                                    configuration.circular_buffer_duration = model[currentIndex];
+                                }
+                            }
+                        }
+                    }
+
+                    RowLayout {
+                        visible: configuration?.mode == 1
+                        Layout.topMargin: 5
+                        Layout.alignment: Qt.AlignVCenter | Qt.AlignLeft
+                        spacing: 20
+                        Text {
+                            Layout.alignment: Qt.AlignVCenter | Qt.AlignLeft
+                            text: "Circular buffer"
+                            color: "#CCCCCC"
+                            font: monospace_font
+                        }
+                        Text {
+                            Layout.alignment: Qt.AlignVCenter | Qt.AlignLeft
+                            text: configuration ? configuration.circular_buffer_usage : "-"
                             color: "#FFFFFF"
                             font: monospace_font
                         }
@@ -344,7 +405,7 @@ ApplicationWindow {
                         Button {
                             property var click_index: 0
                             text: "Stop recording"
-                            visible: configuration?.recording_name != null
+                            visible: configuration?.recording_name != null && configuration?.mode == 0
                             onClicked: {
                                 ++click_index
                                 configuration.stop_recording = click_index

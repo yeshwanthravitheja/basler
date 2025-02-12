@@ -191,7 +191,11 @@ def unpack_file(
                 return
             width, height, exposure, gain = struct.unpack("<HHdd", header)
             frame = numpy.zeros((height, width, 3), dtype=numpy.uint8)
-            factor = max(1.0, math.ceil(960 / width), math.ceil(720 / height))
+            factor = min(
+                math.ceil(4800 / width),
+                math.ceil(3600 / height),
+                max(1.0, math.ceil(960 / width), math.ceil(720 / height)),
+            )
             dimensions = (
                 int(round(width * factor)),
                 int(round(height * factor)),
