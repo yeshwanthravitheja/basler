@@ -1,0 +1,17 @@
+[package]
+edition = "2021"
+name = "python"
+resolver = "2"
+
+[lib]
+crate-type = ["cdylib"]
+name = "transform"
+
+[dependencies]
+numpy = {version = "0.23.0"}
+pyo3 = {version = "0.23.4", features = ["extension-module"]}
+thiserror = "1.0"
+
+[profile.release]
+codegen-units = 1
+lto = true

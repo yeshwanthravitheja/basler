@@ -1,5 +1,0 @@
-faery
-numpy
-pillow
-pypylon
-pyside6

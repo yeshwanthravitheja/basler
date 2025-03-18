@@ -1,7 +1,9 @@
 import json
 import math
+import os
 import pathlib
 import struct
+import sys
 import typing
 
 import faery
@@ -10,134 +12,94 @@ import numpy
 import numpy.typing
 import PIL.Image
 
+import transform
 
-class Unpacker:
-    def __init__(self):
-        self.array: bytes = bytes([])
-        self.unpack_buffer = numpy.zeros(0, dtype=numpy.uint16)
-        self.unpacked_array = numpy.zeros(0, dtype=numpy.uint16)
-        self.width = 0
-        self.height = 0
 
-    def unpack(
-        self,
-        width: int,
-        height: int,
-        data: bytes,
-    ) -> numpy.typing.NDArray[numpy.uint16]:
-        self.width = width
-        self.height = height
-        self.array = bytearray(data)
-        self._unpack()
-        return self.unpacked_array
-
-    def _unpack_bytes(
-        self,
-        byte_0_offset: int,
-        byte_0_mask: int,
-        byte_0_shift: int,
-        byte_1_offset: int,
-        byte_1_mask: int,
-        byte_1_shift: int,
-        output_offset: int,
-    ):
-        if byte_0_mask == 0xFF:
-            self.unpacked_array[output_offset::4] = self.array[byte_0_offset::5]
-        else:
-            numpy.bitwise_and(
-                self.array[byte_0_offset::5],
-                byte_0_mask,
-                out=self.unpacked_array[output_offset::4],
-                dtype=numpy.uint16,
-            )
-        if byte_0_shift != 0:
-            if byte_0_shift > 0:
-                numpy.bitwise_left_shift(
-                    self.unpacked_array[output_offset::4],
-                    byte_0_shift,
-                    out=self.unpacked_array[output_offset::4],
-                    dtype=numpy.uint16,
-                )
-            else:
-                numpy.bitwise_right_shift(
-                    self.unpacked_array[output_offset::4],
-                    -byte_0_shift,
-                    out=self.unpacked_array[output_offset::4],
-                    dtype=numpy.uint16,
-                )
-        if byte_1_mask == 0xFF:
-            self.unpack_buffer[::] = self.array[byte_1_offset::5]
-        else:
-            numpy.bitwise_and(
-                self.array[byte_1_offset::5],
-                byte_1_mask,
-                out=self.unpack_buffer,
-                dtype=numpy.uint16,
-            )
-        if byte_1_shift != 0:
-            if byte_1_shift > 0:
-                numpy.bitwise_left_shift(
-                    self.unpack_buffer,
-                    byte_1_shift,
-                    out=self.unpack_buffer,
-                    dtype=numpy.uint16,
-                )
-            else:
-                numpy.bitwise_right_shift(
-                    self.unpack_buffer,
-                    -byte_1_shift,
-                    out=self.unpack_buffer,
-                    dtype=numpy.uint16,
-                )
-        numpy.bitwise_or(
-            self.unpacked_array[output_offset::4],
-            self.unpack_buffer,
-            out=self.unpacked_array[output_offset::4],
-            dtype=numpy.uint16,
+def draw_progress_bar(columns: int, image_index: int, image_count: int):
+    count_width = math.ceil(math.log10(image_count))
+    prefix = f"{image_index: {count_width}} / {image_count}"
+    progress_bar_width = columns - len(prefix) - 2
+    if progress_bar_width > 2:
+        sys.stdout.write(
+            f"\r{prefix} {faery.display.generate_progress_bar(width=progress_bar_width, progress=image_index / image_count)}"
         )
-
-    def _unpack(self):
-        if len(self.unpacked_array) != self.width * self.height:
-            self.unpacked_array = numpy.zeros(
-                self.width * self.height, dtype=numpy.uint16
-            )
-            self.unpack_buffer = numpy.zeros(
-                self.width * self.height // 4, dtype=numpy.uint16
-            )
-        self._unpack_bytes(0, 0b11111111, 0, 1, 0b11, 8, 0)
-        self._unpack_bytes(1, 0b11111111, -2, 2, 0b1111, 6, 1)
-        self._unpack_bytes(2, 0b11111111, -4, 3, 0b111111, 4, 2)
-        self._unpack_bytes(3, 0b11111111, -6, 4, 0b11111111, 2, 3)
-        numpy.bitwise_left_shift(self.unpacked_array, 6, out=self.unpacked_array)
+    else:
+        sys.stdout.write(f"\r{' ' * columns}\r{prefix}")
+    if image_index == image_count:
+        sys.stdout.write(f"\r{' ' * columns}\r")
 
 
 def unpack_file(
     path: pathlib.Path,
-    unpacker: typing.Optional[Unpacker] = None,
+    unpacker: typing.Optional[transform.Unpacker] = None,
+    demosaicer: typing.Optional[transform.Demosaicer] = None,
     force: bool = False,
 ):
     if unpacker is None:
-        unpacker = Unpacker()
+        unpacker = transform.Unpacker()
     output_directory = path.parent / f"{path.stem}"
     output_directory.mkdir(exist_ok=True)
     frames_output = output_directory / f"{path.stem}_frames"
     frames_output.mkdir(exist_ok=True)
     timestamps_list = []
+
+    # count frames
+    image_count = 0
+    file_size = path.stat().st_size
+    with open(path, "rb") as file:
+        assert file.read(6) == b"BASLER"
+        header = file.read(21)
+        if len(header) < 21:
+            return
+        pixel_format_id, width, height, exposure, gain = struct.unpack("<BHHdd", header)
+        pixel_format = transform.id_to_pixel_format(pixel_format_id)
+        if pixel_format == "BayerRG12p":
+            bit_depth = 12
+        elif pixel_format == "Mono10p":
+            bit_depth = 10
+        else:
+            return Exception(f"unknown pixel format {pixel_format}")
+        data_length = width * height * bit_depth // 8
+
+        while True:
+            timestamp_data = file.read(8)
+            if len(timestamp_data) < 8:
+                break
+            if file.tell() > file_size - data_length:
+                break
+            file.seek(data_length, 1)
+            image_count += 1
+
+    # render "raw" PNGs
+    print(f"{path.stem} – Render frames")
+    columns = os.get_terminal_size().columns
+    draw_progress_bar(
+        columns=columns,
+        image_index=0,
+        image_count=image_count,
+    )
     with open(path, "rb") as file:
         image_index = 0
         assert file.read(6) == b"BASLER"
-        header = file.read(20)
-        if len(header) < 20:
+        header = file.read(21)
+        if len(header) < 21:
             return
-        width, height, exposure, gain = struct.unpack("<HHdd", header)
-        data_length = width * height * 10 // 8
+        pixel_format_id, width, height, exposure, gain = struct.unpack("<BHHdd", header)
+        pixel_format = transform.id_to_pixel_format(pixel_format_id)
+        if pixel_format == "BayerRG12p":
+            bit_depth = 12
+        elif pixel_format == "Mono10p":
+            bit_depth = 10
+        else:
+            return Exception(f"unknown pixel format {pixel_format}")
+        data_length = width * height * bit_depth // 8
+        data = bytearray(data_length)
         while True:
             timestamp_data = file.read(8)
             if len(timestamp_data) < 8:
                 break
             timestamps_list.append(struct.unpack("<Q", timestamp_data)[0])
-            data = file.read(data_length)
-            if len(data) != data_length:
+            if file.readinto(data) != data_length:
                 break
             output_path = frames_output / f"{path.stem}_{image_index:06d}.png"
             image_index += 1
@@ -145,13 +107,25 @@ def unpack_file(
                 write_output_path = (
                     frames_output / f"{path.stem}_{image_index:06d}.png.write"
                 )
-                unpacked_array = unpacker.unpack(width=width, height=height, data=data)
+                unpacked_array = unpacker.unpack(
+                    width=width,
+                    height=height,
+                    data=data,
+                    pixel_format=pixel_format,
+                )
                 PIL.Image.frombytes(
                     mode="I;16",
                     size=(width, height),
                     data=unpacked_array.tobytes(),
                 ).save(str(write_output_path), format="png", compress_level=1)
                 write_output_path.replace(output_path)
+            draw_progress_bar(
+                columns=columns,
+                image_index=image_index,
+                image_count=image_count,
+            )
+
+    # create configuration and timestamps_ns files
     mean_timestamp_delta = numpy.mean(
         numpy.diff(numpy.array(timestamps_list, dtype=numpy.uint64))
     )
@@ -180,17 +154,28 @@ def unpack_file(
         output_directory / f"{path.stem}_timestamps_ns.json", "w"
     ) as timestamps_file:
         json.dump(timestamps_list, timestamps_file)
+
+    # render mp4 video
+    print(f"{path.stem} – Render video")
+    columns = os.get_terminal_size().columns
     output_path = output_directory / f"{path.stem}_render.mp4"
     if force or not output_path.is_file():
+        draw_progress_bar(
+            columns=columns,
+            image_index=0,
+            image_count=image_count,
+        )
         write_output_path = output_directory / f"{path.stem}_render.mp4.write"
         image_index = 0
         with open(path, "rb") as file:
             assert file.read(6) == b"BASLER"
-            header = file.read(20)
-            if len(header) < 20:
+            header = file.read(21)
+            if len(header) < 21:
                 return
-            width, height, exposure, gain = struct.unpack("<HHdd", header)
-            frame = numpy.zeros((height, width, 3), dtype=numpy.uint8)
+            pixel_format_id, width, height, exposure, gain = struct.unpack(
+                "<BHHdd", header
+            )
+            gray_frame: typing.Optional[numpy.ndarray] = None
             factor = min(
                 math.ceil(4800 / width),
                 math.ceil(3600 / height),
@@ -229,17 +214,32 @@ def unpack_file(
                     timestamp = (
                         struct.unpack("<Q", timestamp_data)[0] - timestamps_list[0]
                     )
-                    data = file.read(data_length)
-                    if len(data) != data_length:
+                    if file.readinto(data) != data_length:
                         break
                     unpacked_array = unpacker.unpack(
                         width=width,
                         height=height,
                         data=data,
+                        pixel_format=pixel_format,
                     ).reshape((height, width))
-                    frame[:, :, 0] = unpacked_array >> 8
-                    frame[:, :, 1] = frame[:, :, 0]
-                    frame[:, :, 2] = frame[:, :, 0]
+                    if pixel_format == "BayerRG12p":
+                        if demosaicer is None:
+                            demosaicer = transform.Demosaicer()
+                        frame = demosaicer.demosaicize(unpacked_array)
+                    elif pixel_format == "Mono10p":
+                        if gray_frame is None:
+                            gray_frame = numpy.zeros(
+                                (height, width, 3), dtype=numpy.uint8
+                            )
+                        numpy.right_shift(
+                            unpacked_array, 8, out=unpacked_array, dtype=numpy.uint16
+                        )
+                        gray_frame[:, :, 0] = unpacked_array
+                        gray_frame[:, :, 1] = gray_frame[:, :, 0]
+                        gray_frame[:, :, 2] = gray_frame[:, :, 0]
+                        frame = gray_frame
+                    else:
+                        return Exception(f"unknown pixel format {pixel_format}")
                     output_frame = faery.image.resize(
                         frame,
                         dimensions,
@@ -263,11 +263,21 @@ def unpack_file(
                     )
                     encoder.write(output_frame)
                     image_index += 1
+                    draw_progress_bar(
+                        columns=columns,
+                        image_index=image_index,
+                        image_count=image_count,
+                    )
         write_output_path.rename(output_path)
 
 
 if __name__ == "__main__":
-    unpacker = Unpacker()
+    unpacker = transform.Unpacker()
+    demosaicer = transform.Demosaicer()
     for path in sorted((faery.dirname / "recordings").iterdir()):
         if path.is_file() and path.suffix == ".basler":
-            unpack_file(path=path, unpacker=unpacker)
+            unpack_file(
+                path=path,
+                unpacker=unpacker,
+                demosaicer=demosaicer,
+            )
