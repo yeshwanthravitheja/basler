@@ -1,0 +1,40 @@
+[project]
+name = "transform"
+description = "Frame transformations (bit unpacking and demosaicing)"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [
+  { name = "Alexandre Marcireau", email = "alexandre.marcireau@gmail.com" },
+]
+requires-python = ">=3.9"
+dependencies = [
+    "faery",
+    "numpy",
+    "pillow",
+    "pypylon",
+    "pyside6",
+    "scipy",
+]
+version = "1.0.0"
+
+[build-system]
+requires = ["maturin==1.8.3"]
+build-backend = "maturin"
+
+[tool.maturin]
+python-source = "python"
+module-name = "transform.extension"
+features = ["pyo3/extension-module"]
+
+[tool.pyright]
+typeCheckingMode = "basic"
+executionEnvironments = [{ root = ".", venv = ".venv" }]
+exclude = ["**/__pycache__", "**/.*", "src"]
+
+[tool.isort]
+profile = "black"
+sort_reexports = true
+extend_skip = ["src"]
+
+[tool.black]
+extend-exclude = "src"

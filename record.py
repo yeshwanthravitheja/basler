@@ -17,12 +17,15 @@ import PySide6.QtQml
 import PySide6.QtQuick
 import pypylon.pylon as pylon
 
+import transform
+
 dirname = pathlib.Path(__file__).resolve().parent
 
 
 @dataclasses.dataclass
 class Output:
     path: pathlib.Path
+    pixel_format: transform.PixelFormat
     width: int
     height: int
     exposure: float
@@ -30,6 +33,8 @@ class Output:
 
 
 def size_to_string(size: int) -> str:
+    if size < 1000:
+        return f"{size} B"
     if size < 1000000:
         return f"{size / 1e3:.2f} kB"
     if size < 1000000000:
@@ -158,7 +163,8 @@ class Recorder:
                         queue_output_file.write(b"BASLER")
                         queue_output_file.write(
                             struct.pack(
-                                "<HHdd",
+                                "<BHHdd",
+                                transform.pixel_format_to_id(queue_output.pixel_format),
                                 queue_output.width,
                                 queue_output.height,
                                 queue_output.exposure,
@@ -260,7 +266,8 @@ class Recorder:
                         circular_buffer_output_file.write(b"BASLER")
                         circular_buffer_output_file.write(
                             struct.pack(
-                                "<HHdd",
+                                "<BHHdd",
+                                transform.pixel_format_to_id(new_output.pixel_format),
                                 new_output.width,
                                 new_output.height,
                                 new_output.exposure,
@@ -356,6 +363,7 @@ class Recorder:
     def start(
         self,
         path: pathlib.Path,
+        pixel_format: transform.PixelFormat,
         width: int,
         height: int,
         exposure: float,
@@ -363,6 +371,7 @@ class Recorder:
     ):
         self.output = Output(
             path=path,
+            pixel_format=pixel_format,
             width=width,
             height=height,
             exposure=exposure,
@@ -383,8 +392,17 @@ class Recorder:
 
 
 class ImageProvider(PySide6.QtQuick.QQuickImageProvider):
-    def __init__(self, configuration: PySide6.QtQml.QQmlPropertyMap):
+    def __init__(
+        self,
+        pixel_format: transform.PixelFormat,
+        default_width: int,
+        default_height: int,
+        configuration: PySide6.QtQml.QQmlPropertyMap,
+    ):
         super().__init__(PySide6.QtQml.QQmlImageProviderBase.ImageType.Image)
+        self.pixel_format = pixel_format
+        self.default_width = default_width
+        self.default_height = default_height
         self.configuration = configuration
 
         self.lock = threading.Lock()
@@ -402,8 +420,16 @@ class ImageProvider(PySide6.QtQuick.QQuickImageProvider):
         self.latest_timestamps = numpy.zeros(32, dtype=numpy.uint64)
         self.latest_timestamps_index = 0
 
-        self.unpack_buffer = numpy.zeros(0, dtype=numpy.uint16)
-        self.unpacked_array = numpy.zeros(0, dtype=numpy.uint16)
+        self.unpacker = transform.Unpacker()
+
+        if pixel_format == "BayerRG12p":
+            self.bit_depth = 12
+            self.demosaicer = transform.Demosaicer()
+        elif pixel_format == "Mono10p":
+            self.bit_depth = 10
+            self.demosaicer = None
+        else:
+            return Exception(f"unknown pixel format {pixel_format}")
 
     def update_array(self, timestamp: int, width: int, height: int, data: bytearray):
         with self.lock:
@@ -415,85 +441,6 @@ class ImageProvider(PySide6.QtQuick.QQuickImageProvider):
             self.latest_height = height
             self.latest_array = data
             self.latest_array_index += 1
-
-    def _unpack_bytes(
-        self,
-        byte_0_offset: int,
-        byte_0_mask: int,
-        byte_0_shift: int,
-        byte_1_offset: int,
-        byte_1_mask: int,
-        byte_1_shift: int,
-        output_offset: int,
-    ):
-        if byte_0_mask == 0xFF:
-            self.unpacked_array[output_offset::4] = self.request_array[byte_0_offset::5]
-        else:
-            numpy.bitwise_and(
-                self.request_array[byte_0_offset::5],
-                byte_0_mask,
-                out=self.unpacked_array[output_offset::4],
-                dtype=numpy.uint16,
-            )
-        if byte_0_shift != 0:
-            if byte_0_shift > 0:
-                numpy.bitwise_left_shift(
-                    self.unpacked_array[output_offset::4],
-                    byte_0_shift,
-                    out=self.unpacked_array[output_offset::4],
-                    dtype=numpy.uint16,
-                )
-            else:
-                numpy.bitwise_right_shift(
-                    self.unpacked_array[output_offset::4],
-                    -byte_0_shift,
-                    out=self.unpacked_array[output_offset::4],
-                    dtype=numpy.uint16,
-                )
-        if byte_1_mask == 0xFF:
-            self.unpack_buffer[::] = self.request_array[byte_1_offset::5]
-        else:
-            numpy.bitwise_and(
-                self.request_array[byte_1_offset::5],
-                byte_1_mask,
-                out=self.unpack_buffer,
-                dtype=numpy.uint16,
-            )
-        if byte_1_shift != 0:
-            if byte_1_shift > 0:
-                numpy.bitwise_left_shift(
-                    self.unpack_buffer,
-                    byte_1_shift,
-                    out=self.unpack_buffer,
-                    dtype=numpy.uint16,
-                )
-            else:
-                numpy.bitwise_right_shift(
-                    self.unpack_buffer,
-                    -byte_1_shift,
-                    out=self.unpack_buffer,
-                    dtype=numpy.uint16,
-                )
-        numpy.bitwise_or(
-            self.unpacked_array[output_offset::4],
-            self.unpack_buffer,
-            out=self.unpacked_array[output_offset::4],
-            dtype=numpy.uint16,
-        )
-
-    def _unpack(self):
-        if len(self.unpacked_array) != self.request_width * self.request_height:
-            self.unpacked_array = numpy.zeros(
-                self.request_width * self.request_height, dtype=numpy.uint16
-            )
-            self.unpack_buffer = numpy.zeros(
-                self.request_width * self.request_height // 4, dtype=numpy.uint16
-            )
-        self._unpack_bytes(0, 0b11111111, 0, 1, 0b11, 8, 0)
-        self._unpack_bytes(1, 0b11111111, -2, 2, 0b1111, 6, 1)
-        self._unpack_bytes(2, 0b11111111, -4, 3, 0b111111, 4, 2)
-        self._unpack_bytes(3, 0b11111111, -6, 4, 0b11111111, 2, 3)
-        numpy.bitwise_left_shift(self.unpacked_array, 6, out=self.unpacked_array)
 
     def requestImage(
         self,
@@ -518,22 +465,38 @@ class ImageProvider(PySide6.QtQuick.QQuickImageProvider):
             self.configuration.insert("measured_framerate", framerate)
 
         if len(self.request_array) == 0:
-            size.setWidth(640)
-            size.setHeight(480)
+            size.setWidth(self.default_width)
+            size.setHeight(self.default_height)
             return PySide6.QtGui.QImage(
-                640,
-                480,
+                self.default_width,
+                self.default_height,
                 PySide6.QtGui.QImage.Format.Format_Grayscale16,
             )
-        self._unpack()
+        unpacked_array = self.unpacker.unpack(
+            width=self.request_width,
+            height=self.request_height,
+            data=self.request_array,
+            pixel_format=pixel_format,
+        )
         size.setWidth(self.request_width)
         size.setHeight(self.request_height)
-        image = PySide6.QtGui.QImage(
-            self.unpacked_array.tobytes(),
-            self.request_width,
-            self.request_height,
-            PySide6.QtGui.QImage.Format.Format_Grayscale16,
-        )
+
+        if self.demosaicer is None:
+            image = PySide6.QtGui.QImage(
+                unpacked_array.tobytes(),
+                self.request_width,
+                self.request_height,
+                PySide6.QtGui.QImage.Format.Format_Grayscale16,
+            )
+        else:
+            image = PySide6.QtGui.QImage(
+                self.demosaicer.demosaicize(
+                    unpacked_array.reshape((self.request_height, self.request_width))
+                ).tobytes(),
+                self.request_width,
+                self.request_height,
+                PySide6.QtGui.QImage.Format.Format_RGB888,
+            )
         return image
 
 
@@ -597,16 +560,50 @@ if __name__ == "__main__":
     configuration.insert("mode", 0)
     configuration.insert("circular_buffer_duration", "1 s")
 
+    camera = pylon.InstantCamera(pylon.TlFactory.GetInstance().CreateFirstDevice())
+    camera.Open()
+    available_pixel_formats = camera.PixelFormat.GetSymbolics()
+    if "BayerRG12p" in available_pixel_formats:
+        pixel_format: transform.PixelFormat = "BayerRG12p"
+    elif "Mono10p":
+        pixel_format: transform.PixelFormat = "Mono10p"
+    else:
+        raise Exception(
+            f"the camera's pixel format is not supported by this recorder (the supported formats are BayerRG12p and Mono10p but the camera only supports {available_pixel_formats})"
+        )
+
     application = PySide6.QtGui.QGuiApplication(sys.argv)
     PySide6.QtGui.QFontDatabase.addApplicationFont(str(dirname / "RobotoMono.ttf"))
     monospace_font = PySide6.QtGui.QFontDatabase.font("Roboto Mono", "Regular", 12)
     monospace_font.setPixelSize(12)
     engine = PySide6.QtQml.QQmlApplicationEngine()
     engine.quit.connect(application.quit)
-    image_provider = ImageProvider(configuration=configuration)
+    image_provider = ImageProvider(
+        pixel_format=pixel_format,
+        default_width=camera.Width.Max,
+        default_height=camera.Height.Max,
+        configuration=configuration,
+    )
     engine.rootContext().setContextProperty("monospace_font", monospace_font)
     engine.rootContext().setContextProperty("configuration", configuration)
     engine.addImageProvider("camera", image_provider)
+    engine.setInitialProperties(
+        {
+            "maximum_width": camera.Width.Max,
+            "width_increment": camera.Width.Inc,
+            "maximum_height": camera.Height.Max,
+            "height_increment": camera.Height.Inc,
+            "maximum_framerate": camera.AcquisitionFrameRate.Max * 10,
+            "minimum_exposure": camera.ExposureTime.Min,
+            "maximum_exposure": camera.ExposureTime.Max,
+            "minimum_gain": camera.Gain.Min * 100,
+            "maximum_gain": camera.Gain.Max * 100,
+        }
+    )
+    configuration.insert("width", camera.Width.Max)
+    configuration.insert("height", camera.Height.Max)
+    configuration.insert("x_offset", 0)
+    configuration.insert("y_offset", 0)
     engine.load("record.qml")
     recordings = dirname / "recordings"
     recordings.mkdir(exist_ok=True)
@@ -616,7 +613,6 @@ if __name__ == "__main__":
         "circular_buffer_duration_s": 5.0,
     }
     with Recorder(configuration=configuration) as recorder:
-        camera = pylon.InstantCamera(pylon.TlFactory.GetInstance().CreateFirstDevice())
         camera.RegisterImageEventHandler(
             ImageEventHandler(
                 recorder=recorder,
@@ -628,25 +624,19 @@ if __name__ == "__main__":
         )
         camera.MaxNumQueuedBuffer.Value = 1024
         camera.Open()
-        if camera.Width.Value > 640:
-            camera.Width.Value = 640
-            camera.OffsetX.Value = 16
-        else:
-            camera.OffsetX.Value = 16
-            camera.Width.Value = 640
-        if camera.Height.Value > 480:
-            camera.Height.Value = 480
-            camera.OffsetY.Value = 8
-        else:
-            camera.OffsetY.Value = 8
-            camera.Height.Value = 480
+        camera.OffsetX.Value = 0
+        camera.Width.Value = camera.Width.Max
+        camera.OffsetY.Value = 0
+        camera.Height.Value = camera.Height.Max
         camera.ExposureAuto.Value = "Off"
         camera.GainAuto.Value = "Off"
-        camera.PixelFormat.Value = "Mono10p"
-        camera.ExposureTime.Value = 1000.0  # µs
+        if pixel_format == "BayerRG12p":
+            camera.BalanceWhiteAuto.Value = "Off"
+        camera.PixelFormat.Value = pixel_format
+        camera.ExposureTime.Value = 3000.0  # µs
         camera.Gain.Value = 0.0
         camera.AcquisitionFrameRateEnable.Value = True
-        camera.AcquisitionFrameRate.Value = 500
+        camera.AcquisitionFrameRate.Value = 1000
         configuration.insert("calculated_framerate", camera.ResultingFrameRate.Value)
         configuration.insert(
             "maximum_queued_buffers", int(camera.MaxNumQueuedBuffer.Value)
@@ -654,29 +644,111 @@ if __name__ == "__main__":
 
         def on_configuration_update(key: str, value: typing.Any):
             if key == "width":
-                camera.StopGrabbing()
-                if camera.Width.Value > int(value):
-                    camera.Width.Value = int(value)
-                    camera.OffsetX.Value = int(round((656 - int(value)) / 32) * 16)
+                if int(value) % camera.Width.Inc == 0:
+                    camera.StopGrabbing()
+                    if camera.Width.Value > int(value):
+                        camera.Width.Value = int(value)
+                        camera.OffsetX.Value = max(
+                            int(
+                                round(
+                                    (camera.Width.Max - int(value))
+                                    / (camera.Width.Inc * 2)
+                                )
+                                * camera.Width.Inc
+                            ),
+                            0,
+                        )
+                    else:
+                        camera.OffsetX.Value = max(
+                            int(
+                                round(
+                                    (camera.Width.Max - int(value))
+                                    / (camera.Width.Inc * 2)
+                                )
+                                * camera.Width.Inc
+                            ),
+                            0,
+                        )
+                        camera.Width.Value = int(value)
+                    configuration.insert("x_offset", camera.OffsetX.Value)
+                    camera.StartGrabbing(
+                        pylon.GrabStrategy_OneByOne,
+                        pylon.GrabLoop_ProvidedByInstantCamera,
+                    )
                 else:
-                    camera.OffsetX.Value = int(round((656 - int(value)) / 32) * 16)
-                    camera.Width.Value = int(value)
-                camera.StartGrabbing(
-                    pylon.GrabStrategy_OneByOne,
-                    pylon.GrabLoop_ProvidedByInstantCamera,
-                )
+                    print(f"Warning: Width must be a multiple of {camera.Width.Inc}")
+                    configuration.insert("width", camera.Width.Value)
+                    configuration.insert("x_offset", camera.OffsetX.Value)
             elif key == "height":
-                camera.StopGrabbing()
-                if camera.Height.Value > int(value):
-                    camera.Height.Value = int(value)
-                    camera.OffsetY.Value = (496 - int(value)) // 2
+                if int(value) % camera.Height.Inc == 0:
+                    camera.StopGrabbing()
+                    if camera.Height.Value > int(value):
+                        camera.Height.Value = int(value)
+                        camera.OffsetY.Value = max(
+                            int(
+                                round(
+                                    (camera.Height.Max - int(value))
+                                    / (camera.Height.Inc * 2)
+                                )
+                                * camera.Height.Inc
+                            ),
+                            0,
+                        )
+                    else:
+                        camera.OffsetY.Value = max(
+                            int(
+                                round(
+                                    (camera.Height.Max - int(value))
+                                    / (camera.Height.Inc * 2)
+                                )
+                                * camera.Height.Inc
+                            ),
+                            0,
+                        )
+                        camera.Height.Value = int(value)
+                    configuration.insert("y_offset", camera.OffsetY.Value)
+                    camera.StartGrabbing(
+                        pylon.GrabStrategy_OneByOne,
+                        pylon.GrabLoop_ProvidedByInstantCamera,
+                    )
                 else:
-                    camera.OffsetY.Value = (496 - int(value)) // 2
-                    camera.Height.Value = int(value)
-                camera.StartGrabbing(
-                    pylon.GrabStrategy_OneByOne,
-                    pylon.GrabLoop_ProvidedByInstantCamera,
-                )
+                    print(f"Warning: Height must be a multiple of {camera.Height.Inc}")
+                    configuration.insert("height", camera.Height.Value)
+                    configuration.insert("y_offset", camera.OffsetY.Value)
+            elif key == "x_offset":
+                if int(value) % camera.Width.Inc == 0:
+                    new_width = camera.Width.Value + int(value)
+                    if new_width <= camera.Width.Max:
+                        camera.StopGrabbing()
+                        camera.OffsetX.Value = int(value)
+                        camera.StartGrabbing(
+                            pylon.GrabStrategy_OneByOne,
+                            pylon.GrabLoop_ProvidedByInstantCamera,
+                        )
+                    else:
+                        configuration.insert("x_offset", camera.OffsetX.Value)
+                else:
+                    print(f"Warning: X offset must be a multiple of {camera.Width.Inc}")
+                    configuration.insert("width", camera.Width.Value)
+                    configuration.insert("x_offset", camera.OffsetX.Value)
+            elif key == "y_offset":
+                if int(value) % camera.Height.Inc == 0:
+                    new_height = camera.Height.Value + int(value)
+                    if new_height <= camera.Height.Max:
+                        camera.StopGrabbing()
+                        camera.OffsetY.Value = int(value)
+                        camera.StartGrabbing(
+                            pylon.GrabStrategy_OneByOne,
+                            pylon.GrabLoop_ProvidedByInstantCamera,
+                        )
+                    else:
+                        configuration.insert("y_offset", camera.OffsetX.Value)
+                else:
+                    print(
+                        f"Warning: Y offset must be a multiple of {camera.Height.Inc}"
+                    )
+                    configuration.insert("height", camera.Height.Value)
+                    configuration.insert("y_offset", camera.OffsetY.Value)
             elif key == "framerate":
                 camera.AcquisitionFrameRate.Value = float(value) / 10.0
             elif key == "exposure":
@@ -699,6 +771,7 @@ if __name__ == "__main__":
                 )
                 recorder.start(
                     path=recordings / recording_name,
+                    pixel_format=pixel_format,
                     width=camera.Width.Value,
                     height=camera.Height.Value,
                     exposure=exposure,

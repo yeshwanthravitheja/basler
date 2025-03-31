@@ -1,2 +1,6 @@
 .venv
 recordings
+*.so
+*.pyc
+__pycache__
+target

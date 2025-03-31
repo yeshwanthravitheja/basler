@@ -9,6 +9,16 @@ ApplicationWindow {
     height: 720
     title: "Basler"
 
+    property var maximum_width
+    property var width_increment
+    property var maximum_height
+    property var height_increment
+    property var maximum_framerate
+    property var minimum_exposure
+    property var maximum_exposure
+    property var minimum_gain
+    property var maximum_gain
+
     Timer {
         property var trigger_index: 0
         interval: 16
@@ -80,10 +90,10 @@ ApplicationWindow {
                             palette.mid: "#494949"
                             palette.highlight: "#1E88E5"
                             Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
-                            from: 16
-                            to: 656
-                            value: 640
-                            stepSize: 16
+                            from: width_increment
+                            to: maximum_width
+                            value: configuration && configuration.width ? configuration.width : 0
+                            stepSize: width_increment
                             editable: true
                             enabled: configuration?.recording_name == null
                             font: monospace_font
@@ -112,16 +122,84 @@ ApplicationWindow {
                             palette.mid: "#494949"
                             palette.highlight: "#1E88E5"
                             Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
-                            from: 1
-                            to: 496
-                            value: 480
-                            stepSize: 1
+                            from: height_increment
+                            to: maximum_height
+                            value: configuration && configuration.height ? configuration.height : 0
+                            stepSize: height_increment
                             editable: true
                             enabled: configuration?.recording_name == null
                             font: monospace_font
 
                             onValueModified: {
                                 configuration.height = value;
+                            }
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.topMargin: 5
+                        Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
+                        Layout.fillHeight: true
+                        Layout.fillWidth: true
+                        spacing: 20
+                        Text {
+                            Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
+                            text: "X offset"
+                            color: "#CCCCCC"
+                            font: monospace_font
+                        }
+                        SpinBox {
+                            palette.button: "#393939"
+                            palette.buttonText: "#FFFFFF"
+                            palette.text: "#FFFFFF"
+                            palette.base: "#191919"
+                            palette.mid: "#494949"
+                            palette.highlight: "#1E88E5"
+                            Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
+                            from: 0
+                            to: maximum_width
+                            value: configuration && configuration.x_offset ? configuration.x_offset : 0
+                            stepSize: width_increment
+                            editable: true
+                            enabled: configuration?.recording_name == null
+                            font: monospace_font
+
+                            onValueModified: {
+                                configuration.x_offset = value;
+                            }
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.topMargin: 5
+                        Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
+                        Layout.fillHeight: true
+                        Layout.fillWidth: true
+                        spacing: 20
+                        Text {
+                            Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
+                            text: "Y offset"
+                            color: "#CCCCCC"
+                            font: monospace_font
+                        }
+                        SpinBox {
+                            palette.button: "#393939"
+                            palette.buttonText: "#FFFFFF"
+                            palette.text: "#FFFFFF"
+                            palette.base: "#191919"
+                            palette.mid: "#494949"
+                            palette.highlight: "#1E88E5"
+                            Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
+                            from: 0
+                            to: maximum_height
+                            value: configuration && configuration.y_offset ? configuration.y_offset : 0
+                            stepSize: height_increment
+                            editable: true
+                            enabled: configuration?.recording_name == null
+                            font: monospace_font
+
+                            onValueModified: {
+                                configuration.y_offset = value;
                             }
                         }
                     }
@@ -146,9 +224,9 @@ ApplicationWindow {
                             palette.highlight: "#1E88E5"
                             Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
                             from: 1
-                            to: 10000000
+                            to: maximum_framerate
                             stepSize: 1
-                            value: 5000
+                            value: 10000
                             editable: true
                             enabled: configuration?.recording_name == null
                             font: monospace_font
@@ -192,9 +270,9 @@ ApplicationWindow {
                             palette.mid: "#494949"
                             palette.highlight: "#1E88E5"
                             Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
-                            from: 59
-                            to: 10000000
-                            value: 1000
+                            from: minimum_exposure
+                            to: maximum_exposure
+                            value: 3000
                             stepSize: 1
                             editable: true
                             enabled: configuration?.recording_name == null
@@ -225,8 +303,8 @@ ApplicationWindow {
                             palette.mid: "#494949"
                             palette.highlight: "#1E88E5"
                             Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
-                            from: 0
-                            to: 1200
+                            from: minimum_gain
+                            to: maximum_gain
                             stepSize: 1
                             value: 0
                             editable: true
@@ -381,7 +459,7 @@ ApplicationWindow {
                         }
                         Text {
                             Layout.alignment: Qt.AlignVCenter | Qt.AlignLeft
-                            text: configuration ? configuration.circular_buffer_usage : "-"
+                            text: configuration && configuration.circular_buffer_usage ? configuration.circular_buffer_usage : "-"
                             color: "#FFFFFF"
                             font: monospace_font
                         }

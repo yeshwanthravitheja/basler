@@ -9,7 +9,8 @@ Tested on macOS 15.1.1 (Apple silicon) and Windows 11 (x86).
 ```sh
 python3 -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate.ps1
-pip install -r requirements.txt
+pip install maturin==1.8.3
+maturin develop
 ```
 
 ## Usage
@@ -25,7 +26,7 @@ pip install -r requirements.txt
 2. Convert recorded binary blobs (".basler" files) to JSON metadata, PNG images, and mp4 videos.
 
     ```sh
-    python unpack.py
+    python render.py
     ```
 
     The PNG frames are a lossless representation of the original data (the camera encodes grey levels on 10 bits, the PNG frames use 16 bits). The mp4 video, whilst convenient for data inspection, is a lossy representation that should be avoided for data analysis and algorithm development.
