@@ -6,11 +6,13 @@ Tested on macOS 15.1.1 (Apple silicon) and Windows 11 (x86).
 
 ## Installation
 
+Install Rust (https://rustup.rs).
+
 ```sh
 python3 -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate.ps1
 pip install maturin==1.8.3
-maturin develop
+maturin develop --release
 ```
 
 ## Usage
